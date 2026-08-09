@@ -116,6 +116,16 @@ desc = "Jump to the first tagged file here"
 on   = [ "T", "p" ]
 run  = "plugin lazy-tag -- prune"
 desc = "Forget tags whose files are gone"
+
+[[mgr.prepend_keymap]]
+on   = [ "T", "v" ]
+run  = "plugin lazy-tag -- view"
+desc = "Show tagged files first"
+
+[[mgr.prepend_keymap]]
+on   = [ "T", "V" ]
+run  = "plugin lazy-tag -- view --only"
+desc = "Show only tagged files"
 ```
 
 ### Actions
@@ -127,10 +137,32 @@ desc = "Forget tags whose files are gone"
 | `select` | `--key=X`, `--pick` | Replaces the selection with the tagged files in the current directory. |
 | `jump` | `--key=X`, `--pick`, `--first` | Moves the cursor to the last tagged file in the current directory, or the first with `--first`. |
 | `prune` | | Forgets every tag whose file no longer exists, and reports how many went. |
+| `view` | `--only`, `--off` | Toggles a listing with tagged files first, or with `--only`, just the tagged ones. |
 
 `--key=X` names the tag. `--pick` waits for a keypress instead — no popup, no
 input box, exactly one key, `<Esc>` cancels. With neither, `toggle` uses the
 configured default (`*`) and `select`/`jump` act on any tag.
+
+### The view
+
+`view` puts tagged files at the top of the listing, untagged below, each group
+keeping your normal sort order. Tags win over `dir_first`, so a tagged file
+floats above untagged directories. `view --only` hides the untagged ones
+entirely. Either stays on as you move between directories, and rebuilds itself
+in each one; calling the same mode again, or `--off`, turns it off.
+
+Yazi has no hook for custom sorting, so the view is a synthetic listing fed back
+to yazi as a `search://` folder. Two consequences worth knowing:
+
+- The tab is in search mode while the view is on — the header says so, and
+  `<Esc>` leaves it. Leaving that way is fine; the plugin notices and puts your
+  sort settings back.
+- **`view` borrows the tab's sort setting** (it has to be `none`, or yazi
+  re-sorts the listing out from under us) and returns it when the view ends.
+  `view --only` needs no ordering, so it leaves your sort alone entirely.
+
+The listing is a snapshot: tagging a file while the view is on updates its
+indicator in place but does not re-order it until the view is rebuilt.
 
 `prune` is the answer to files that disappear behind yazi's back — deleted from
 a shell, moved by another program, or on a drive that was unmounted. Tags only
@@ -156,7 +188,8 @@ Two invocations step out of that order, because neither waiting for a keypress
 nor stat-ing a file can happen on yazi's main thread: anything with `--pick`,
 and `prune`. Those hand themselves off to the scheduler, so commands after them
 in the same `run` list do not wait. (You never need `--mode=async` in a binding
-— the plugin arranges it itself.)
+— the plugin arranges it itself.) `view` is synchronous, but it queues several
+commands of its own, so chaining onto it is not useful either.
 
 ## Storage
 

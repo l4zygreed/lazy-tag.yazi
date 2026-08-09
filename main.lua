@@ -11,6 +11,9 @@ local KIND = "@lazy-tag"
 
 local DEFAULT_KEY = "*"
 local DEFAULT_COLOR = "red"
+-- Search domain of the synthetic tag-ordered listing; also how we recognise our
+-- own folder when a `cd` comes back to us.
+local VIEW_DOMAIN = "lazy-tag"
 -- `Entity` draws the file name at order 4000, so anything below that lands in
 -- front of it. 3500 sits between the search prefix (3000) and the name.
 local DEFAULT_ORDER = 3500
@@ -284,11 +287,155 @@ local function prune()
 	end
 
 	if #gone == 0 then
-		return info("Nothing to prune, all %d tagged files are still there", #paths)
+		return info("Nothing to prune, every tagged file is still there")
 	end
 	drop_paths(gone)
 	info("Pruned %d of %d tags", #gone, #paths)
 end
+
+--          ╭─────────────────────────────────────────────────────────╮
+--          │                          Views                          │
+--          ╰─────────────────────────────────────────────────────────╯
+
+-- Yazi has no hook for custom sorting, so a tag-ordered listing has to be fed
+-- to it as a synthetic `search://` folder. Two things make that work: file ops
+-- are keyed by URL, so `search://lazy-tag//x` is never clobbered by a reload of
+-- `/x`; and yazi re-sorts after every `update_files` unless the tab's sort is
+-- `none`, which is why the "first" mode has to borrow that setting while it is
+-- on. The "only" mode needs no ordering, so it leaves sorting alone.
+
+--- Pref field -> the option name the `sort` command expects.
+local SORT_OPTS = {
+	sort_by = "by",
+	sort_reverse = "reverse",
+	sort_dir_first = "dir_first",
+	sort_sensitive = "sensitive",
+	sort_translit = "translit",
+	sort_fallback = "fallback",
+}
+
+--- `ChaMode::T_DIR`. The synthetic folder never comes from disk, so a bare
+--- directory `Cha` is all `update_files`'s `done` needs.
+local DIR_CHA = { kind = 0, mode = 0x4000 }
+
+-- `Id` has no `__tostring`, and its userdata is rebuilt per scope, so the
+-- numeric value is the only stable key. The `cd` payload reports it as a plain
+-- integer, which keeps both sides in agreement.
+local active_tab = ya.sync(function() return cx.active.id.value end)
+
+local view_mode = ya.sync(function(st, tab)
+	local view = st.views[tab]
+	return view and view.mode or nil
+end)
+
+--- The current listing, tagged files hoisted to the front. Order within each
+--- group is left alone, and since `cx.active.current.files` already arrives in
+--- the user's sort order, that is the configured order for free.
+---@return table files, integer tagged
+local function ordered_files(st, mode)
+	local cur = cx.active.current
+	local tagged, rest = {}, {}
+	for i = 1, #cur.files do
+		local f = cur.files[i]
+		if st.db[key_of(f.url)] then
+			tagged[#tagged + 1] = f.bare
+		elseif mode == "first" then
+			rest[#rest + 1] = f.bare
+		end
+	end
+
+	local n = #tagged
+	for _, f in ipairs(rest) do
+		tagged[#tagged + 1] = f
+	end
+	return tagged, n
+end
+
+local function push_listing(cwd, files)
+	local id = ya.id("ft") -- a fresh files ticket, so our part/done pair matches
+	-- Every emit consumes the Url it is given, so hand each one its own.
+	local function target() return Url(cwd):into_search(VIEW_DOMAIN) end
+
+	ya.emit("cd", { target(), source = "search" })
+	-- An empty part resets the folder and claims the ticket; the next one fills
+	-- it in our order.
+	ya.emit("update_files", { op = fs.op("part", { id = id, url = target(), files = {} }) })
+	ya.emit("update_files", { op = fs.op("part", { id = id, url = target(), files = files }) })
+	ya.emit("update_files", { op = fs.op("done", { id = id, url = target(), cha = Cha(DIR_CHA) }) })
+end
+
+local function emit_sort(saved)
+	local opts = {}
+	for field, name in pairs(SORT_OPTS) do
+		opts[name] = saved[field]
+	end
+	ya.emit("sort", opts)
+end
+
+local function restore_sort(st, tab)
+	local saved = st.sorts[tab]
+	if saved then
+		st.sorts[tab] = nil
+		emit_sort(saved)
+	end
+end
+
+---@param rebuild boolean? true when following the user into a new directory
+local enter_view = ya.sync(function(st, tab, mode, rebuild)
+	local files, tagged = ordered_files(st, mode)
+	if tagged == 0 and not rebuild then
+		return fail("Nothing is tagged here")
+	end
+
+	if mode ~= "first" then
+		restore_sort(st, tab)
+	else
+		if not st.sorts[tab] then
+			local pref = cx.active.pref
+			st.sorts[tab] = {
+				sort_by = pref.sort_by,
+				sort_reverse = pref.sort_reverse,
+				sort_dir_first = pref.sort_dir_first,
+				sort_sensitive = pref.sort_sensitive,
+				sort_translit = pref.sort_translit,
+				sort_fallback = pref.sort_fallback,
+			}
+		end
+		-- Borrow the sort setting, otherwise `update_files` would immediately
+		-- re-sort the listing we are about to push.
+		ya.emit("sort", { by = "none" })
+	end
+
+	local cwd = tostring(cx.active.current.cwd.path)
+	st.views[tab] = { mode = mode, cwd = cwd }
+	if tagged > 0 then
+		push_listing(cwd, files)
+	end
+end)
+
+--- Give the sort setting back so the directory we just entered gets ordered
+--- properly; `enter_view` borrows it again on the way through.
+local rearm_view = ya.sync(function(st, tab)
+	if st.sorts[tab] then
+		emit_sort(st.sorts[tab])
+	end
+end)
+
+local leave_view = ya.sync(function(st, tab)
+	if not st.views[tab] then
+		return
+	end
+
+	st.views[tab] = nil
+	if cx.active.current.cwd.is_search then
+		-- Escaping produces a `cd` back to the directory the view was built for,
+		-- which is byte-for-byte what the user pressing <Esc> looks like. Mark it
+		-- so the handler lets that one event through untouched.
+		st.skips[tab] = (st.skips[tab] or 0) + 1
+		ya.emit("escape", { search = true })
+	end
+	restore_sort(st, tab)
+end)
 
 --          ╭─────────────────────────────────────────────────────────╮
 --          │                          Setup                          │
@@ -301,6 +448,11 @@ function M:setup(opts)
 	st.db = {}
 	st.color = opts.color or DEFAULT_COLOR
 	st.key = opts.key or DEFAULT_KEY
+	-- Both keyed by tab id: sorting is a per-tab preference, so the view has to
+	-- be too.
+	st.views = {}
+	st.sorts = {}
+	st.skips = {}
 
 	Entity:children_add(
 		function(entity) return draw(entity, st) end,
@@ -325,6 +477,42 @@ function M:setup(opts)
 		end
 		transfer(st, changes)
 	end)
+	-- Keep a view alive across navigation. Landing back on the directory the
+	-- view was built for means the user escaped out of it; landing anywhere else
+	-- means they navigated, so rebuild there.
+	ps.sub("cd", function(body)
+		local tab = body.tab
+		-- Checked before anything else, so the count can never be left stranded.
+		if (st.skips[tab] or 0) > 0 then
+			st.skips[tab] = st.skips[tab] - 1
+			return
+		end
+
+		local view = st.views[tab]
+		if not view or tab ~= cx.active.id.value then
+			return
+		end
+
+		-- The local `cd` payload carries only a tab id -- `EmberCd::owned` drops
+		-- the url for in-process subscribers -- so read the destination from the
+		-- context. A search cwd is our own listing landing; ignore it.
+		local cwd = cx.active.current.cwd
+		if cwd.is_search then
+			return
+		end
+
+		if tostring(cwd.path) == view.cwd then
+			return leave_view(tab)
+		end
+
+		-- A directory loaded while we hold `sort=none` arrives in raw readdir
+		-- order, so hand the setting back first and let yazi sort it. Both emits
+		-- are queued, so by the time we are re-entered the listing is in the
+		-- user's order and ready to snapshot.
+		rearm_view(tab)
+		ya.emit("plugin", { PKG, ya.quote("view") .. " --rebuild" })
+	end)
+
 	ps.sub("move", function(body) transfer(st, body.items) end)
 	ps.sub("duplicate", function(body) transfer(st, body.items, true) end)
 	ps.sub("delete", function(body) forget(st, body.urls) end)
@@ -344,7 +532,7 @@ local function pick()
 	return idx and PICK_CANDS[idx].on
 end
 
-local ACTIONS = { toggle = true, clear = true, select = true, jump = true, prune = true }
+local ACTIONS = { toggle = true, clear = true, select = true, jump = true, prune = true, view = true }
 
 --- Two things cannot happen on yazi's main thread, which is where a `@sync
 --- entry` runs: `ya.which` waiting for a key, and `fs.cha` stat-ing a file. An
@@ -396,6 +584,23 @@ function M:entry(job)
 		jump_tagged(key, job.args.first)
 	elseif action == "prune" then
 		prune()
+	elseif action == "view" then
+		local tab = active_tab()
+		local mode = job.args.only and "only" or "first"
+
+		if job.args.off or (not job.args.rebuild and view_mode(tab) == mode) then
+			leave_view(tab)
+		elseif job.args.rebuild then
+			enter_view(tab, view_mode(tab), true)
+		elseif view_mode(tab) then
+			-- Switching modes: the listing we are standing in no longer holds the
+			-- untagged files, so drop back to the real directory first and come
+			-- through the queue again once it has reloaded.
+			leave_view(tab)
+			ya.emit("plugin", { PKG, ya.quote("view") .. (job.args.only and " --only" or "") })
+		else
+			enter_view(tab, mode)
+		end
 	end
 end
 
