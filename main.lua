@@ -97,7 +97,7 @@ end
 local apply = ya.sync(function(st, key)
 	local paths = {}
 	for _, url in ipairs(targets()) do
-		if not (url.is_regular or url.is_search) then
+		if not (url.spec.is_regular or url.spec.is_search) then
 			return fail("`%s` lives on a virtual filesystem and cannot be tagged", tostring(url))
 		end
 		paths[#paths + 1] = key_of(url)
@@ -427,7 +427,7 @@ local leave_view = ya.sync(function(st, tab)
 	end
 
 	st.views[tab] = nil
-	if cx.active.current.cwd.is_search then
+	if cx.active.current.cwd.spec.is_search then
 		-- Escaping produces a `cd` back to the directory the view was built for,
 		-- which is byte-for-byte what the user pressing <Esc> looks like. Mark it
 		-- so the handler lets that one event through untouched.
@@ -497,7 +497,7 @@ function M:setup(opts)
 		-- the url for in-process subscribers -- so read the destination from the
 		-- context. A search cwd is our own listing landing; ignore it.
 		local cwd = cx.active.current.cwd
-		if cwd.is_search then
+		if cwd.spec.is_search then
 			return
 		end
 
