@@ -1,4 +1,4 @@
---- @since 26.5.6
+--- @since 26.8.15
 --- @sync entry
 
 local PKG = "lazy-tag"
@@ -82,8 +82,9 @@ end
 ---@return Url[] the selected files, or the hovered one when nothing is selected
 local function targets()
 	local tab, urls = cx.active, {}
-	for _, u in pairs(tab.selected) do
-		urls[#urls + 1] = u
+	-- `Selected` yields `File`s, so take the url of each one.
+	for _, f in pairs(tab.selected) do
+		urls[#urls + 1] = f.url
 	end
 	if #urls == 0 and tab.current.hovered then
 		urls[1] = tab.current.hovered.url
@@ -133,18 +134,20 @@ end)
 --          ╰─────────────────────────────────────────────────────────╯
 
 local select_tagged = ya.sync(function(st, key)
-	local files, urls = cx.active.current.files, {}
+	-- `toggle_all` takes `File`s. A list of anything else is dropped, and an
+	-- empty list means the whole directory, so pass the files themselves.
+	local files, hits = cx.active.current.files, {}
 	for i = 1, #files do
 		local tag = st.db[key_of(files[i].url)]
 		if tag and (not key or tag == key) then
-			urls[#urls + 1] = tostring(files[i].url)
+			hits[#hits + 1] = files[i]
 		end
 	end
 
 	ya.emit("escape", { select = true })
-	if #urls > 0 then
-		urls.state = "on"
-		ya.emit("toggle_all", urls)
+	if #hits > 0 then
+		hits.state = "on"
+		ya.emit("toggle_all", hits)
 	end
 end)
 
@@ -338,9 +341,9 @@ local function ordered_files(st, mode)
 	for i = 1, #cur.files do
 		local f = cur.files[i]
 		if st.db[key_of(f.url)] then
-			tagged[#tagged + 1] = f.bare
+			tagged[#tagged + 1] = f
 		elseif mode == "first" then
-			rest[#rest + 1] = f.bare
+			rest[#rest + 1] = f
 		end
 	end
 
@@ -361,7 +364,10 @@ local function push_listing(cwd, files)
 	-- it in our order.
 	ya.emit("update_files", { op = fs.op("part", { id = id, url = target(), files = {} }) })
 	ya.emit("update_files", { op = fs.op("part", { id = id, url = target(), files = files }) })
-	ya.emit("update_files", { op = fs.op("done", { id = id, url = target(), cha = Cha(DIR_CHA) }) })
+	ya.emit(
+		"update_files",
+		{ op = fs.op("done", { id = id, file = { url = target(), cha = Cha(DIR_CHA) } }) }
+	)
 end
 
 local function emit_sort(saved)
@@ -470,7 +476,7 @@ function M:setup(opts)
 	-- Local subscriptions: only this instance's own file operations are handled.
 	-- Other instances run their own copy of the plugin and share the result.
 	ps.sub("rename", function(body) transfer(st, { body }) end)
-	ps.sub("bulk", function(body)
+	ps.sub("bulk-rename", function(body)
 		local changes = {}
 		for from, to in pairs(body) do
 			changes[#changes + 1] = { from = from, to = to }

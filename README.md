@@ -37,7 +37,7 @@ down a directory tagging as it goes.
 
 ## Requirements
 
-yazi 26.5.6 or newer.
+yazi 26.8.15 or newer.
 
 ## Installation
 
